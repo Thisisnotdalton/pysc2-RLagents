@@ -279,6 +279,7 @@ class AC_Network():
                 if scope != 'global':
                     self.policy_arg_placeholder[arg_type] = []
                     self.policy_one_hot[arg_type] = []
+                    self.responsible_outputs[arg_type] = []
                 for arg_size in arg_type.sizes:
                     if arg_type == actions.TYPES.screen or arg_type == actions.TYPES.screen2:
                         size = self.model.screen_size
@@ -298,62 +299,7 @@ class AC_Network():
                     if scope != 'global':
                         self.policy_arg_placeholder[arg_type].append(tf.placeholder(shape=[None], dtype = tf.int32))
                         self.policy_one_hot.append(tf.one_hot(self.policy_arg_place_holder[arg_type][-1], size, dtype=tf.float32))
-
-#            self.policy_arg['select_add'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=2,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(1.0))
-#            self.policy_arg['queued'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=2,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(1.0))
-#            self.policy_arg['select_point_act'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=4,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['select_unit_act'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=4,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['control_group_act'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=5,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['control_group_id'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=10,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['select_unit_id'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=500,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['screen_x'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=self.model.screen_size,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['screen_y'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=self.model.screen_size,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['screen2_x'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=self.model.screen_size,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
-#            self.policy_arg['screen2_y'] = tf.layers.dense(
-#                inputs=self.latent_vector,
-#                units=self.model.screen_size,
-#                activation=tf.nn.softmax,
-#                kernel_initializer=normalized_columns_initializer(0.01))
+                        self.responsible_outputs[arg_type].append(tf.reduce_sum(self.policy_args[arg_type][-1]*self.policy_one_shot[arg_type][-1], [1]))
             self.value = tf.layers.dense(
                 inputs=self.latent_vector,
                 units=1,
@@ -363,49 +309,12 @@ class AC_Network():
             # self.gradients - gradients of loss wrt local_vars
             # applies the gradients to update the global network
             if scope != 'global':
-                #Create a dictionary to hold one_hots
-                for arg_type in self.policy_arg.keys():
-                    arg_one_hots = []
-                    for arg_size in arg_type.sizes
                 self.actions_base = tf.placeholder(shape=[None],dtype=tf.int32)
                 self.actions_onehot_base = tf.one_hot(self.actions_base,self.model.action_count,dtype=tf.float32)
-#                self.actions_arg_screen_x = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_screen_x = tf.one_hot(self.actions_arg_screen_x,self.model.screen_size,dtype=tf.float32)
-#                self.actions_arg_screen_y = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_screen_y = tf.one_hot(self.actions_arg_screen_y,self.model.screen_size,dtype=tf.float32)
-#                self.actions_arg_screen2_x = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_screen2_x = tf.one_hot(self.actions_arg_screen2_x,self.model.screen_size,dtype=tf.float32)
-#                self.actions_arg_screen2_y = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_screen2_y = tf.one_hot(self.actions_arg_screen2_y,self.model.screen_size,dtype=tf.float32)
-#                self.actions_arg_select_point_act = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_select_point_act = tf.one_hot(self.actions_arg_select_point_act,4,dtype=tf.float32) #float
-#                self.actions_arg_select_add = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_select_add = tf.one_hot(self.actions_arg_select_add,2,dtype=tf.float32) #float
-#                self.actions_arg_control_group_act = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_control_group_act = tf.one_hot(self.actions_arg_control_group_act,5,dtype=tf.float32) #float
-#                self.actions_arg_control_group_id = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_control_group_id = tf.one_hot(self.actions_arg_control_group_id,10,dtype=tf.float32)
-#                self.actions_arg_select_unit_id = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_select_unit_id = tf.one_hot(self.actions_arg_select_unit_id,500,dtype=tf.float32)
-#                self.actions_arg_select_unit_act = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_select_unit_act = tf.one_hot(self.actions_arg_select_unit_act,4,dtype=tf.float32)
-#                self.actions_arg_queued = tf.placeholder(shape=[None],dtype=tf.int32)
-#                self.actions_onehot_arg_queued = tf.one_hot(self.actions_arg_queued,2,dtype=tf.float32)
                 self.target_v = tf.placeholder(shape=[None],dtype=tf.float32)
                 self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
 
                 self.responsible_outputs_base = tf.reduce_sum(self.policy_base_actions * self.actions_onehot_base, [1])
-                self.responsible_outputs_arg_screen_x = tf.reduce_sum(self.policy_arg_screen_x * self.actions_onehot_arg_screen_x, [1])
-                self.responsible_outputs_arg_screen_y = tf.reduce_sum(self.policy_arg_screen_y * self.actions_onehot_arg_screen_y, [1])
-                self.responsible_outputs_arg_screen2_x = tf.reduce_sum(self.policy_arg_screen2_x * self.actions_onehot_arg_screen2_x, [1])
-                self.responsible_outputs_arg_screen2_y = tf.reduce_sum(self.policy_arg_screen2_y * self.actions_onehot_arg_screen2_y, [1])
-                self.responsible_outputs_arg_select_point_act = tf.reduce_sum(self.policy_arg_select_point_act)
-                self.responsible_outputs_arg_select_add = tf.reduce_sum(self.policy_arg_select_add)
-                self.responsible_outputs_arg_control_group_act = tf.reduce_sum(self.policy_arg_control_group_act)
-                self.responsible_outputs_arg_control_group_id = tf.reduce_sum(self.policy_arg_control_group_id)
-                self.responsible_outputs_arg_select_unit_id = tf.reduce_sum(self.policy_arg_select_unit_id)
-                self.responsible_outputs_arg_select_unit_act = tf.reduce_sum(self.policy_arg_select_unit_act)
-                self.responsible_outputs_arg_queued = tf.reduce_sum(self.policy_arg_queued)
                 
                 # Loss functions
                 self.value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_v - tf.reshape(self.value,[-1])))
