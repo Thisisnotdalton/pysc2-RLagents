@@ -104,7 +104,7 @@ def sample_dist(dist):
 
 # Structure data of AC Netowirk based on race of player
 class AgentModel:
-    def __ init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, minimap_size=64, screen_channels=7):
+    def __init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, minimap_size=64, screen_channels=7):
         if race not in sc2_env.races.keys():
             raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
         self.screen_size = screen_size
@@ -273,6 +273,24 @@ class AC_Network():
                 self.policy_arg_placeholder = {}
                 self.policy_one_hot = {}
                 self.responsible_outputs = {}
+                self.entropy_base = - tf.reduce_sum(self.policy_base_actions * self.log_policy_base_actions)
+                self.entropy = self.entropy_base
+                self.entropy_arg = {}
+                self.policy_loss_arg = {}
+                self.actions_base = tf.placeholder(shape=[None],dtype=tf.int32)
+                self.actions_onehot_base = tf.one_hot(self.actions_base,self.model.action_count,dtype=tf.float32)
+                self.target_v = tf.placeholder(shape=[None],dtype=tf.float32)
+                self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
+
+                self.responsible_outputs_base = tf.reduce_sum(self.policy_base_actions * self.actions_onehot_base, [1])
+                
+                # Loss functions
+                self.value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_v - tf.reshape(self.value,[-1])))
+
+                self.log_policy_base_actions = tf.log(tf.clip_by_value(self.policy_base_actions, 1e-20, 1.0)) # avoid NaN with clipping when value in policy becomes zero
+        
+                self.policy_loss_base = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_base, 1e-20, 1.0))*self.advantages)
+                self.policy_loss = self.policy_loss_base
             #iterate over all function argument types
             for arg_type in actions.TYPES:
                 self.policy_arg[arg_type] = []
@@ -280,6 +298,8 @@ class AC_Network():
                     self.policy_arg_placeholder[arg_type] = []
                     self.policy_one_hot[arg_type] = []
                     self.responsible_outputs[arg_type] = []
+                    self.entropy_arg[arg_type] = []
+                    self.policy_loss_arg[arg_type] = []
                 for arg_size in arg_type.sizes:
                     if arg_type == actions.TYPES.screen or arg_type == actions.TYPES.screen2:
                         size = self.model.screen_size
@@ -299,7 +319,11 @@ class AC_Network():
                     if scope != 'global':
                         self.policy_arg_placeholder[arg_type].append(tf.placeholder(shape=[None], dtype = tf.int32))
                         self.policy_one_hot.append(tf.one_hot(self.policy_arg_place_holder[arg_type][-1], size, dtype=tf.float32))
-                        self.responsible_outputs[arg_type].append(tf.reduce_sum(self.policy_args[arg_type][-1]*self.policy_one_shot[arg_type][-1], [1]))
+                        self.responsible_outputs[arg_type].append(tf.reduce_sum(self.policy_arg[arg_type][-1]*self.policy_one_shot[arg_type][-1], [1]))
+                        self.entropy_arg[arg_type].append(-tf.reduce_sum(self.policy_arg[arg_type][-1] * tf.log(tf.clip_by_value(self.policy_arg[arg_type], 1e-20, 1.0))))
+                        self.entropy += self.entropy_arg[arg_type][-1]
+                        self.policy_loss_arg[arg_type].append(tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs[arg_type], 1e-20, 1.0))*self.advantages))
+                        self.policy_loss += self.policy_loss_arg[arg_type][-1]
             self.value = tf.layers.dense(
                 inputs=self.latent_vector,
                 units=1,
@@ -309,47 +333,7 @@ class AC_Network():
             # self.gradients - gradients of loss wrt local_vars
             # applies the gradients to update the global network
             if scope != 'global':
-                self.actions_base = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_base = tf.one_hot(self.actions_base,self.model.action_count,dtype=tf.float32)
-                self.target_v = tf.placeholder(shape=[None],dtype=tf.float32)
-                self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
-
-                self.responsible_outputs_base = tf.reduce_sum(self.policy_base_actions * self.actions_onehot_base, [1])
-                
-                # Loss functions
-                self.value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_v - tf.reshape(self.value,[-1])))
-
-                self.log_policy_base_actions = tf.log(tf.clip_by_value(self.policy_base_actions, 1e-20, 1.0)) # avoid NaN with clipping when value in policy becomes zero
-                self.entropy_base = - tf.reduce_sum(self.policy_base_actions * self.log_policy_base_actions)
-                self.entropy_arg_screen_x = - tf.reduce_sum(self.policy_arg_screen_x * tf.log(tf.clip_by_value(self.policy_arg_screen_x, 1e-20, 1.0)))
-                self.entropy_arg_screen_y = - tf.reduce_sum(self.policy_arg_screen_y * tf.log(tf.clip_by_value(self.policy_arg_screen_y, 1e-20, 1.0)))
-                self.entropy_arg_screen2_x = - tf.reduce_sum(self.policy_arg_screen2_x * tf.log(tf.clip_by_value(self.policy_arg_screen2_x, 1e-20, 1.0)))
-                self.entropy_arg_screen2_y = - tf.reduce_sum(self.policy_arg_screen2_y * tf.log(tf.clip_by_value(self.policy_arg_screen2_y, 1e-20, 1.0)))
-                self.entropy_arg_select_point_act = - tf.reduce_sum(self.policy_arg_select_point_act * tf.log(tf.clip_by_value(self.policy_arg_select_point_act, 1e-20, 1.0)))
-                self.entropy_arg_select_add = - tf.reduce_sum(self.policy_arg_select_add * tf.log(tf.clip_by_value(self.policy_arg_select_add, 1e-20, 1.0)))
-                self.entropy_arg_control_group_act = - tf.reduce_sum(self.policy_arg_control_group_act * tf.log(tf.clip_by_value(self.policy_arg_control_group_act, 1e-20, 1.0)))
-                self.entropy_arg_control_group_id = - tf.reduce_sum(self.policy_arg_control_group_id * tf.log(tf.clip_by_value(self.policy_arg_control_group_id, 1e-20, 1.0)))
-                self.entropy_arg_select_unit_id = - tf.reduce_sum(self.policy_arg_select_unit_id * tf.log(tf.clip_by_value(self.policy_arg_select_unit_id, 1e-20, 1.0)))
-                self.entropy_arg_select_unit_act = - tf.reduce_sum(self.policy_arg_select_unit_act * tf.log(tf.clip_by_value(self.policy_arg_select_unit_act, 1e-20, 1.0)))
-                self.entropy_arg_queued = - tf.reduce_sum(self.policy_arg_queued * tf.log(tf.clip_by_value(self.policy_arg_queued, 1e-20, 1.0)))
-                self.entropy = self.entropy_base + self.entropy_arg_screen_x + self.entropy_arg_screen_y + self.entropy_arg_screen2_x + self.entropy_arg_screen2_y + self.entropy_arg_select_point_act + self.entropy_arg_select_add + self.entropy_arg_control_group_act + self.entropy_arg_control_group_id + self.entropy_arg_select_unit_id + self.entropy_arg_select_unit_act + self.entropy_arg_queued
-
-                self.policy_loss_base = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_base, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_screen_x = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_screen_x, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_screen_y = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_screen_y, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_screen2_x = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_screen2_x, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_screen2_y = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_screen2_y, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_select_point_act = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_select_point_act, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_select_add = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_select_add, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_control_group_act = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_control_group_act, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_control_group_id = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_control_group_id, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_select_unit_id = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_select_unit_id, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_select_unit_act = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_select_unit_act, 1e-20, 1.0))*self.advantages)
-                self.policy_loss_arg_queued = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_arg_queued, 1e-20, 1.0))*self.advantages)
-                self.policy_loss = self.policy_loss_base + self.policy_loss_arg_screen_x + self.policy_loss_arg_screen_y + self.policy_loss_arg_screen2_x + self.policy_loss_arg_screen2_y + self.policy_loss_arg_select_point_act + self.policy_loss_arg_select_add + self.policy_loss_arg_control_group_act + self.policy_loss_arg_control_group_id + self.policy_loss_arg_select_unit_id + self.policy_loss_arg_select_unit_act + self.policy_loss_arg_queued
-
                 self.loss = 0.5 * self.value_loss + self.policy_loss - self.entropy * 0.01
-
                 # Get gradients from local network using local losses
                 local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
                 self.gradients = tf.gradients(self.loss,local_vars)
@@ -464,20 +448,7 @@ class Worker():
                 
                 while not episode_end:
                     # Take an action using distributions from policy networks' outputs.
-                    base_action_dist, screen_x_dist, screen_y_dist, screen2_x_dist, screen2_y_dist, select_point_act_dist,select_add_dist,control_group_act_dist,control_group_id_dist,select_unit_id_dist,select_unit_act_dist,queued_dist,v = sess.run([
-                        self.local_AC.policy_base_actions, 
-                        self.local_AC.policy_arg_screen_x, 
-                        self.local_AC.policy_arg_screen_y, 
-                        self.local_AC.policy_arg_screen2_x, 
-                        self.local_AC.policy_arg_screen2_y, 
-                        self.local_AC.policy_arg_select_point_act,
-                        self.local_AC.policy_arg_select_add,
-                        self.local_AC.policy_arg_control_group_act,
-                        self.local_AC.policy_arg_control_group_id,
-                        self.local_AC.policy_arg_select_unit_id,
-                        self.local_AC.policy_arg_select_unit_act,
-                        self.local_AC.policy_arg_queued,
-                        self.local_AC.value],
+                    base_action_dist, v = sess.run([self.local_AC.policy_base_actions, self.local_AC.value],
                         feed_dict={self.local_AC.inputs_spatial_screen_reshaped: screen_stack,
                         self.local_AC.inputs_nonspatial: nonspatial_stack})
 
@@ -492,99 +463,22 @@ class Worker():
                         base_action_dist[0] /= current_sum
                         
                     base_action = sample_dist(base_action_dist)
-                    arg_screen_x = sample_dist(screen_x_dist)
-                    arg_screen_y = sample_dist(screen_y_dist)
-                    arg_screen2_x = sample_dist(screen2_x_dist)
-                    arg_screen2_y = sample_dist(screen2_y_dist)
-                    arg_select_point_act = sample_dist(select_point_act_dist)
-                    arg_select_add = sample_dist(select_add_dist)
-                    arg_control_group_act = sample_dist(control_group_act_dist)
-                    arg_control_group_id = sample_dist(control_group_id_dist)
-                    arg_select_unit_id = sample_dist(select_unit_id_dist)
-                    arg_select_unit_act = sample_dist(select_unit_act_dist)
-                    arg_queued = sample_dist(queued_dist)
                     #Convert selected action to function class
-                    fun = self.model.get_action(base_action)
+                    action = self.model.get_action(base_action)
                     #Select arguments based on function
-                    args = []
-                    for argType in fun.args:
-                        #TODO
-                        argsOfType=[]
-                        for i in range(argType.size):
-                            
-                    # 17 relevant base actions
-                    if base_action == 0:
-                        # 0/no_op
-                        action_id = 0
-                        arguments = []
-                    elif base_action == 1:
-                        # 1/move_camera
-                        action_id = 1
-                        arguments = [[arg_screen_x, arg_screen_y]]
-                    elif base_action == 2:
-                        # 2/select_point
-                        action_id = 2
-                        arguments = [[arg_select_point_act],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 3:
-                        # 3/select_rect
-                        action_id = 3
-                        arguments = [[arg_select_add],[arg_screen_x, arg_screen_y],[arg_screen2_x, arg_screen2_y]]
-                    elif base_action == 4:
-                        # 4/select_control_group
-                        action_id = 4
-                        arguments = [[arg_control_group_act],[arg_control_group_id]]
-                    elif base_action == 5:
-                        # 5/select_unit 
-                        action_id = 5
-                        arguments = [[arg_select_unit_act],[arg_select_unit_id]]
-                    elif base_action == 6:
-                        # 7/select_army
-                        action_id = 7
-                        arguments = [[arg_select_add]]
-                    elif base_action == 7:
-                        # 12/Attack_screen
-                        action_id = 12
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 8:
-                        # 13/Attack_minimap
-                        action_id = 13
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 9:
-                        # 274/HoldPosition_quick
-                        action_id = 274
-                        arguments = [[arg_queued]]
-                    elif base_action == 10:
-                        # 331/Move_screen
-                        action_id = 331
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 11:
-                        # 332/Move_minimap
-                        action_id = 332
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 12:
-                        # 333/Patrol_screen
-                        action_id = 333
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 13:
-                        # 334/Patrol_minimap
-                        action_id = 334
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 14:
-                        # 451/Smart_screen 
-                        action_id = 451
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 15:
-                        # 452/Smart_minimap
-                        action_id = 452
-                        arguments = [[arg_queued],[arg_screen_x, arg_screen_y]]
-                    elif base_action == 16:
-                        # 453/Stop_quick
-                        action_id = 453
-                        arguments = [[arg_queued]]
+                    used_args = []
+                    for arg_type in action.args:
+                        caclulated_args = []
+                        for i in range(len(arg_type.sizes)):
+                            #Run session on required args for action
+                            calculated_args.append(sess.run(self.policy_arg[arg_type][i]))
+                        #Append complete argument to list of arguments
+                        used_args.append(calculated_args)
                     
-                    a = actions.FunctionCall(action_id, arguments)
+                    
+                    a = actions.FunctionCall(action.id, used_args)
                     obs = self.env.step(actions=[a])
-                    r, nonspatial_stack, minimap_stack, screen_stack, episode_end = process_observation(obs[0])
+                    r, nonspatial_stack, minimap_stack, screen_stack, episode_end = self.model.process_observation(obs[0])
 
                     if not episode_end:
                         episode_frames.append(obs[0])
