@@ -104,11 +104,12 @@ def sample_dist(dist):
 
 # Structure data of AC Netowirk based on race of player
 class AgentModel:
-    def __ init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, screen_channels=7):
+    def __ init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, minimap_size=64, screen_channels=7):
         if race not in sc2_env.races.keys():
             raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
         self.screen_size = screen_size
         self.screen_channels = screen_channels
+        self.minipam_size = minimap_size
         self.isTraining = isTraining
         self.multi_select_max = int(multi_select_max)
         self.race = race
@@ -267,61 +268,92 @@ class AC_Network():
                 units=self.model.action_count,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_select_add = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=2,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(1.0))
-            self.policy_arg_queued = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=2,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(1.0))
-            self.policy_arg_select_point_act = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=4,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_select_unit_act = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=4,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_control_group_act = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=5,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_control_group_id = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=10,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_select_unit_id = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=500,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_screen_x = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=self.model.screen_size,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_screen_y = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=self.model.screen_size,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_screen2_x = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=self.model.screen_size,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
-            self.policy_arg_screen2_y = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=self.model.screen_size,
-                activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
+            self.policy_arg = {}
+            if scope != 'global':
+                self.policy_arg_placeholder = {}
+                self.policy_one_hot = {}
+                self.responsible_outputs = {}
+            #iterate over all function argument types
+            for arg_type in actions.TYPES:
+                self.policy_arg[arg_type] = []
+                if scope != 'global':
+                    self.policy_arg_placeholder[arg_type] = []
+                    self.policy_one_hot[arg_type] = []
+                for arg_size in arg_type.sizes:
+                    if arg_type == actions.TYPES.screen or arg_type == actions.TYPES.screen2:
+                        size = self.model.screen_size
+                    elif arg_type == actions.TYPES.minimap:
+                        size = self.model.minimap_size
+                    else:
+                        size = arg_size
+
+                    if arg_type == actions.TYPES.queued or arg_type == actions.TYPES.select_add:
+                        init_val = 1.0
+                    else:
+                        init_val = 0.01
+                    self.policy_arg[arg_type].append(tf.layers.dense(inputs=self.latent_vector,
+                                                    units=size,
+                                                    activation=tf.nn.softmax,
+                                                    kernel_initializer=normalized_columns_initializer(init_val)))
+                    if scope != 'global':
+                        self.policy_arg_placeholder[arg_type].append(tf.placeholder(shape=[None], dtype = tf.int32))
+                        self.policy_one_hot.append(tf.one_hot(self.policy_arg_place_holder[arg_type][-1], size, dtype=tf.float32))
+
+#            self.policy_arg['select_add'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=2,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(1.0))
+#            self.policy_arg['queued'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=2,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(1.0))
+#            self.policy_arg['select_point_act'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=4,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['select_unit_act'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=4,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['control_group_act'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=5,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['control_group_id'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=10,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['select_unit_id'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=500,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['screen_x'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=self.model.screen_size,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['screen_y'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=self.model.screen_size,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['screen2_x'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=self.model.screen_size,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
+#            self.policy_arg['screen2_y'] = tf.layers.dense(
+#                inputs=self.latent_vector,
+#                units=self.model.screen_size,
+#                activation=tf.nn.softmax,
+#                kernel_initializer=normalized_columns_initializer(0.01))
             self.value = tf.layers.dense(
                 inputs=self.latent_vector,
                 units=1,
@@ -331,30 +363,34 @@ class AC_Network():
             # self.gradients - gradients of loss wrt local_vars
             # applies the gradients to update the global network
             if scope != 'global':
+                #Create a dictionary to hold one_hots
+                for arg_type in self.policy_arg.keys():
+                    arg_one_hots = []
+                    for arg_size in arg_type.sizes
                 self.actions_base = tf.placeholder(shape=[None],dtype=tf.int32)
                 self.actions_onehot_base = tf.one_hot(self.actions_base,self.model.action_count,dtype=tf.float32)
-                self.actions_arg_screen_x = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen_x = tf.one_hot(self.actions_arg_screen_x,self.model.screen_size,dtype=tf.float32)
-                self.actions_arg_screen_y = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen_y = tf.one_hot(self.actions_arg_screen_y,self.model.screen_size,dtype=tf.float32)
-                self.actions_arg_screen2_x = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen2_x = tf.one_hot(self.actions_arg_screen2_x,self.model.screen_size,dtype=tf.float32)
-                self.actions_arg_screen2_y = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen2_y = tf.one_hot(self.actions_arg_screen2_y,self.model.screen_size,dtype=tf.float32)
-                self.actions_arg_select_point_act = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_select_point_act = tf.one_hot(self.actions_arg_select_point_act,4,dtype=tf.float32)
-                self.actions_arg_select_add = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_select_add = tf.one_hot(self.actions_arg_select_add,2,dtype=tf.float32)
-                self.actions_arg_control_group_act = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_control_group_act = tf.one_hot(self.actions_arg_control_group_act,5,dtype=tf.float32)
-                self.actions_arg_control_group_id = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_control_group_id = tf.one_hot(self.actions_arg_control_group_id,10,dtype=tf.float32)
-                self.actions_arg_select_unit_id = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_select_unit_id = tf.one_hot(self.actions_arg_select_unit_id,500,dtype=tf.float32)
-                self.actions_arg_select_unit_act = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_select_unit_act = tf.one_hot(self.actions_arg_select_unit_act,4,dtype=tf.float32)
-                self.actions_arg_queued = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_queued = tf.one_hot(self.actions_arg_queued,2,dtype=tf.float32)
+#                self.actions_arg_screen_x = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_screen_x = tf.one_hot(self.actions_arg_screen_x,self.model.screen_size,dtype=tf.float32)
+#                self.actions_arg_screen_y = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_screen_y = tf.one_hot(self.actions_arg_screen_y,self.model.screen_size,dtype=tf.float32)
+#                self.actions_arg_screen2_x = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_screen2_x = tf.one_hot(self.actions_arg_screen2_x,self.model.screen_size,dtype=tf.float32)
+#                self.actions_arg_screen2_y = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_screen2_y = tf.one_hot(self.actions_arg_screen2_y,self.model.screen_size,dtype=tf.float32)
+#                self.actions_arg_select_point_act = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_select_point_act = tf.one_hot(self.actions_arg_select_point_act,4,dtype=tf.float32) #float
+#                self.actions_arg_select_add = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_select_add = tf.one_hot(self.actions_arg_select_add,2,dtype=tf.float32) #float
+#                self.actions_arg_control_group_act = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_control_group_act = tf.one_hot(self.actions_arg_control_group_act,5,dtype=tf.float32) #float
+#                self.actions_arg_control_group_id = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_control_group_id = tf.one_hot(self.actions_arg_control_group_id,10,dtype=tf.float32)
+#                self.actions_arg_select_unit_id = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_select_unit_id = tf.one_hot(self.actions_arg_select_unit_id,500,dtype=tf.float32)
+#                self.actions_arg_select_unit_act = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_select_unit_act = tf.one_hot(self.actions_arg_select_unit_act,4,dtype=tf.float32)
+#                self.actions_arg_queued = tf.placeholder(shape=[None],dtype=tf.int32)
+#                self.actions_onehot_arg_queued = tf.one_hot(self.actions_arg_queued,2,dtype=tf.float32)
                 self.target_v = tf.placeholder(shape=[None],dtype=tf.float32)
                 self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
 
@@ -562,8 +598,11 @@ class Worker():
                     fun = self.model.get_action(base_action)
                     #Select arguments based on function
                     args = []
-                    for arg in fun.args:
+                    for argType in fun.args:
                         #TODO
+                        argsOfType=[]
+                        for i in range(argType.size):
+                            
                     # 17 relevant base actions
                     if base_action == 0:
                         # 0/no_op
