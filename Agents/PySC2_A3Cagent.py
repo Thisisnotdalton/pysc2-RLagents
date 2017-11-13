@@ -20,10 +20,16 @@ import tensorflow as tf
 import scipy.signal
 from time import sleep
 import os
-
 from pysc2.env import sc2_env
 from pysc2.env import environment
 from pysc2.lib import actions
+
+from SC2Definitions import *
+
+_UNIT_TYPE = features.SCREEN_FEATURES.unit_type.index
+_PLAYER_RELATIVE = features.SCREEN_FEATURES.player_relative.index
+_ENEMY = 4
+_SELECT_SIZE = 7
 
 """
 Use the following command to launch Tensorboard:
@@ -96,17 +102,137 @@ def sample_dist(dist):
     sample = np.argmax(dist == sample)
     return sample
 
+# Structure data of AC Netowirk based on race of player
+class AgentModel:
+    def __ init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, screen_channels=7):
+        if race not in sc2_env.races.keys():
+            raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
+        self.screen_size = screen_size
+        self.screen_channels = screen_channels
+        self.isTraining = isTraining
+        self.multi_select_max = int(multi_select_max)
+        self.race = race
+        if len(ACTIONS[race]) < 1 or len(ACTIONS['N']) < 1:
+            print('Classifying actions based on race...')
+            classify_actions()
+        self.general_actions = list(ACTIONS['N'])
+        print('General Actions:\n{0}'.format(self.general_actions))
+        #Limit actions based on race
+        self.race_actions = list(ACTIONS[race])
+        print('Race Actions:\n{0}'.format(self.race_actions))
+        #Create dictionaries for quicker look-ups of action indices
+        self.action_indices = {'N':{},race:{}}
+        for i in range(len(self.general_actions)):
+            self.action_indices['N'][self.general_actions[i]] = i
+        for i in range(len(self.race_actions)):
+            self.action_indices[race][self.race_actions[i]] = i
+        #Create arrays counting how many times actions were used
+        self.used_actions = {'N':np.zeros(len(self.general_actions)), race:np.zeros(len(self.race_actions))}
+        self.action_count = len(self.general_actions)+len(self.race_actions)
+        self.nonspatial_size = self.calculate_nonspatial_size()
+        self.reset()
+        
+    def reset(self):
+        #Keep track of last action used
+        self.last_action_used = 0
+        #Keep track of units seen for duration of game
+        self.max_units_seen = np.zeros(UNIT_TYPES)
+        
+    def process_observation(self, obs):
+        #Update units seen
+        enemy_unit_types = np.zeros(self.max_units_seen.size)
+        for i in range(obs.observation['screen'].shape[0]):
+            for j in range(obs.observation['screen'].shape[1]):
+                if obs.observation['screen'][_PLAYER_RELATIVE, i, j] == _ENEMY and obs.observation['screen'][_UNIT_TYPE, i, j] < UNIT_TYPES:
+                    enemy_unit_types[obs.observation['screen'][_UNIT_TYPE, i, j]] += 1
+        for i in range(1, UNIT_TYPES):
+            self.max_units_seen[i] = max(self.max_units_seen[i], enemy_unit_types[i])
+        screen_channels = 7
+        multi_select_max = 100
+        # is episode over?
+        episode_end = obs.step_type == environment.StepType.LAST
+        # reward
+        reward = obs.reward
+        # features
+        features = obs.observation
+        # nonspatial features
+        # TimeStep.observation['control_groups'](10,2)
+        # TimeStep.observation['single_select'](1,7)
+        # TimeStep.observation['multi_select'](n,7)
+        nonspatial_stack = features['control_groups'].reshape(-1)
+        nonspatial_stack = np.concatenate((nonspatial_stack, features['single_select'].reshape(-1))) 
+        multi_select = features['multi_select'].reshape(-1)
+        # if multi_select has less than multi_select_max units, pad with zeros
+        if len(multi_select) < multi_select_max * 7:
+            multi_select = np.concatenate((multi_select, np.zeros(multi_select_max * 7 - len(multi_select))))
+        nonspatial_stack = np.concatenate((nonspatial_stack, multi_select))
+        # spatial_minimap features
+        # not used for DefeatRoaches since no camera movement is required
+        minimap_stack = None
+        # spatial_screen features
+        # TimeStep.observation['screen'][5] (player_relative)
+        # TimeStep.observation['screen'][6] (unit_type)
+        # TimeStep.observation['screen'][7] (selected)
+        # TimeStep.observation['screen'][8] (unit_hit_points)
+        # TimeStep.observation['screen'][9] (unit_hit_points_ratio)
+        # TimeStep.observation['screen'][14] (unit_density)
+        # TimeStep.observation['screen'][15] (unit_density_aa)
+        screen_stack = np.stack((features['screen'][5], features['screen'][6], features['screen'][7], features['screen'][8], features['screen'][9], features['screen'][14], features['screen'][15]), axis=2)
+        return reward, nonspatial_stack.reshape([-1,self.nonspatial_size]), minimap_stack, screen_stack.reshape([-1,64,64,screen_channels]), episode_end
+
+    def get_action(self, action_index):
+        if action_selected < len(self.general_actions):
+            return actions.FUNCTIONS[self.general_actions[action_index]]
+        else:
+            action_index -= len(self.general_actions)
+            return actions.FUNCTIONS[self.race_actions[action_index]]
+    
+    def act(self, action_selected, action_arguments):
+        self.last_action_used = action_selected
+        #Determine whether action was race specific or not
+        if action_selected < len(self.general_actions):
+            action_type = 'N'
+        else:
+            action_type = self.race
+            action_selected -= len(self.general_actions)
+        #Update how many times action was called
+        self.used_actions[action_type][action_selected] += 1
+
+        
+    def calculate_nonspatial_size(self):
+        #Add action space sizes for tracking which actions we can take
+        size = self.action_count * 2 #Multiply by two for entries that keep track of how many times used
+        #Increase size by number of unit types for enemies seen
+        size += self.max_units_seen.size
+        #Increase size by nonspatial structured observation data:
+        #1 player_id
+        #2 minerals
+        #3 vespene
+        #4 food used (otherwise known as supply)
+        #5 food cap
+        #6 food used by army
+        #7 food used by workers
+        #8 idle worker count
+        #9 army count
+        #10 warp gate count (for protoss)
+        #11 larva count (for zerg)
+        size += 11
+        #Increase size by control groups (10,2) and single select (1,7)
+        size += 20 + _SELECT_SIZE
+        #Increase size by max potential for units to be selected
+        size += _SELECT_SIZE * self.multi_select_max
+        return size
+
+
 ## ACTOR-CRITIC NETWORK
 
 class AC_Network():
-    def __init__(self,scope,trainer):
+    def __init__(self,scope,trainer,agentModel=None):
+        self.model = agentModel           
         with tf.variable_scope(scope):
             # Architecture here follows Atari-net Agent described in [1] Section 4.3
-            nonspatial_size = 727
-            screen_channels = 7
-
-            self.inputs_nonspatial = tf.placeholder(shape=[None,nonspatial_size], dtype=tf.float32)
-            self.inputs_spatial_screen_reshaped = tf.placeholder(shape=[None,64,64,screen_channels], dtype=tf.float32)
+            self.inputs_nonspatial = tf.placeholder(shape=[None,self.agent.nonspatial_size], dtype=tf.float32)
+            self.inputs_spatial_screen_reshaped = tf.placeholder(shape=[None,self.model.screen_size, self.model.screen_size,self.model.screen_channels], dtype=tf.float32)
             self.nonspatial_dense = tf.layers.dense(
                 inputs=self.inputs_nonspatial,
                 units=32,
@@ -138,7 +264,7 @@ class AC_Network():
             # 1 value network
             self.policy_base_actions = tf.layers.dense(
                 inputs=self.latent_vector,
-                units=17,
+                units=self.model.action_count,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.policy_arg_select_add = tf.layers.dense(
@@ -178,22 +304,22 @@ class AC_Network():
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.policy_arg_screen_x = tf.layers.dense(
                 inputs=self.latent_vector,
-                units=64,
+                units=self.model.screen_size,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.policy_arg_screen_y = tf.layers.dense(
                 inputs=self.latent_vector,
-                units=64,
+                units=self.model.screen_size,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.policy_arg_screen2_x = tf.layers.dense(
                 inputs=self.latent_vector,
-                units=64,
+                units=self.model.screen_size,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.policy_arg_screen2_y = tf.layers.dense(
                 inputs=self.latent_vector,
-                units=64,
+                units=self.model.screen_size,
                 activation=tf.nn.softmax,
                 kernel_initializer=normalized_columns_initializer(0.01))
             self.value = tf.layers.dense(
@@ -206,15 +332,15 @@ class AC_Network():
             # applies the gradients to update the global network
             if scope != 'global':
                 self.actions_base = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_base = tf.one_hot(self.actions_base,17,dtype=tf.float32)
+                self.actions_onehot_base = tf.one_hot(self.actions_base,self.model.action_count,dtype=tf.float32)
                 self.actions_arg_screen_x = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen_x = tf.one_hot(self.actions_arg_screen_x,64,dtype=tf.float32)
+                self.actions_onehot_arg_screen_x = tf.one_hot(self.actions_arg_screen_x,self.model.screen_size,dtype=tf.float32)
                 self.actions_arg_screen_y = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen_y = tf.one_hot(self.actions_arg_screen_y,64,dtype=tf.float32)
+                self.actions_onehot_arg_screen_y = tf.one_hot(self.actions_arg_screen_y,self.model.screen_size,dtype=tf.float32)
                 self.actions_arg_screen2_x = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen2_x = tf.one_hot(self.actions_arg_screen2_x,64,dtype=tf.float32)
+                self.actions_onehot_arg_screen2_x = tf.one_hot(self.actions_arg_screen2_x,self.model.screen_size,dtype=tf.float32)
                 self.actions_arg_screen2_y = tf.placeholder(shape=[None],dtype=tf.int32)
-                self.actions_onehot_arg_screen2_y = tf.one_hot(self.actions_arg_screen2_y,64,dtype=tf.float32)
+                self.actions_onehot_arg_screen2_y = tf.one_hot(self.actions_arg_screen2_y,self.model.screen_size,dtype=tf.float32)
                 self.actions_arg_select_point_act = tf.placeholder(shape=[None],dtype=tf.int32)
                 self.actions_onehot_arg_select_point_act = tf.one_hot(self.actions_arg_select_point_act,4,dtype=tf.float32)
                 self.actions_arg_select_add = tf.placeholder(shape=[None],dtype=tf.int32)
@@ -343,8 +469,8 @@ class Worker():
         # Update the global network using gradients from loss
         # Generate network statistics to periodically save
         feed_dict = {self.local_AC.target_v:discounted_rewards,
-            self.local_AC.inputs_spatial_screen_reshaped:np.stack(obs_screen).reshape(-1,64,64,7),
-            self.local_AC.inputs_nonspatial:np.stack(obs_nonspatial).reshape(-1,727),
+            self.local_AC.inputs_spatial_screen_reshaped:np.stack(obs_screen).reshape(-1,self.mode.screen_size,self.model.screen_size,self.model.screen_channels),
+            self.local_AC.inputs_nonspatial:np.stack(obs_nonspatial).reshape(-1,self.model.nonspatial_size),
             self.local_AC.actions_base:actions_base,
             self.local_AC.actions_arg_screen_x:actions_arg_screen_x,
             self.local_AC.actions_arg_screen_y:actions_arg_screen_y,
@@ -385,8 +511,9 @@ class Worker():
                 
                 # Start new episode
                 obs = self.env.reset()
+                self.model.reset()
                 episode_frames.append(obs[0])
-                reward, nonspatial_stack, minimap_stack, screen_stack, episode_end = process_observation(obs[0])
+                reward, nonspatial_stack, minimap_stack, screen_stack, episode_end = self.model.process_observation(obs[0])
                 s_screen = screen_stack
                 s_nonspatial = nonspatial_stack
                 
@@ -431,7 +558,12 @@ class Worker():
                     arg_select_unit_id = sample_dist(select_unit_id_dist)
                     arg_select_unit_act = sample_dist(select_unit_act_dist)
                     arg_queued = sample_dist(queued_dist)
-
+                    #Convert selected action to function class
+                    fun = self.model.get_action(base_action)
+                    #Select arguments based on function
+                    args = []
+                    for arg in fun.args:
+                        #TODO
                     # 17 relevant base actions
                     if base_action == 0:
                         # 0/no_op
