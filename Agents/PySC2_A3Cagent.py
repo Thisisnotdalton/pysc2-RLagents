@@ -48,42 +48,6 @@ def update_target_graph(from_scope,to_scope):
         op_holder.append(to_var.assign(from_var))
     return op_holder
 
-# Processes PySC2 observations
-def process_observation(observation):
-    nonspatial_size = 727
-    screen_channels = 7
-    multi_select_max = 100
-    # is episode over?
-    episode_end = observation.step_type == environment.StepType.LAST
-    # reward
-    reward = observation.reward
-    # features
-    features = observation.observation
-    # nonspatial features
-    # TimeStep.observation['control_groups'](10,2)
-    # TimeStep.observation['single_select'](1,7)
-    # TimeStep.observation['multi_select'](n,7)
-    nonspatial_stack = features['control_groups'].reshape(-1)
-    nonspatial_stack = np.concatenate((nonspatial_stack, features['single_select'].reshape(-1))) 
-    multi_select = features['multi_select'].reshape(-1)
-    # if multi_select has less than multi_select_max units, pad with zeros
-    if len(multi_select) < multi_select_max * 7:
-        multi_select = np.concatenate((multi_select, np.zeros(multi_select_max * 7 - len(multi_select))))
-    nonspatial_stack = np.concatenate((nonspatial_stack, multi_select))
-    # spatial_minimap features
-    # not used for DefeatRoaches since no camera movement is required
-    minimap_stack = None
-    # spatial_screen features
-    # TimeStep.observation['screen'][5] (player_relative)
-    # TimeStep.observation['screen'][6] (unit_type)
-    # TimeStep.observation['screen'][7] (selected)
-    # TimeStep.observation['screen'][8] (unit_hit_points)
-    # TimeStep.observation['screen'][9] (unit_hit_points_ratio)
-    # TimeStep.observation['screen'][14] (unit_density)
-    # TimeStep.observation['screen'][15] (unit_density_aa)
-    screen_stack = np.stack((features['screen'][5], features['screen'][6], features['screen'][7], features['screen'][8], features['screen'][9], features['screen'][14], features['screen'][15]), axis=2)
-    return reward, nonspatial_stack.reshape([-1,nonspatial_size]), minimap_stack, screen_stack.reshape([-1,64,64,screen_channels]), episode_end
-
 # Discounting function used to calculate discounted returns.
 def discount(x, gamma):
     return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
@@ -104,13 +68,13 @@ def sample_dist(dist):
 
 # Structure data of AC Netowirk based on race of player
 class AgentModel:
-    def __init__(self, race = 'T', isTraining = False, multi_select_max = 100, screen_size = 64, minimap_size=64, screen_channels=7):
+    def __init__(self, race = 'T', is_training = False, multi_select_max = 100, screen_size = 64, minimap_size=64, screen_channels=7):
         if race not in sc2_env.races.keys():
             raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
         self.screen_size = screen_size
         self.screen_channels = screen_channels
-        self.minipam_size = minimap_size
-        self.isTraining = isTraining
+        self.minimap_size = minimap_size
+        self.is_training = is_training
         self.multi_select_max = int(multi_select_max)
         self.race = race
         if len(ACTIONS[race]) < 1 or len(ACTIONS['N']) < 1:
@@ -130,8 +94,8 @@ class AgentModel:
         #Create arrays counting how many times actions were used
         self.used_actions = {'N':np.zeros(len(self.general_actions)), race:np.zeros(len(self.race_actions))}
         self.action_count = len(self.general_actions)+len(self.race_actions)
-        self.nonspatial_size = self.calculate_nonspatial_size()
         self.reset()
+        self.nonspatial_size = self.calculate_nonspatial_size()
         
     def reset(self):
         #Keep track of last action used
@@ -228,11 +192,11 @@ class AgentModel:
 ## ACTOR-CRITIC NETWORK
 
 class AC_Network():
-    def __init__(self,scope,trainer,agentModel=None):
-        self.model = agentModel           
+    def __init__(self,scope,trainer,agent_model=None):
+        self.model = agent_model           
         with tf.variable_scope(scope):
             # Architecture here follows Atari-net Agent described in [1] Section 4.3
-            self.inputs_nonspatial = tf.placeholder(shape=[None,self.agent.nonspatial_size], dtype=tf.float32)
+            self.inputs_nonspatial = tf.placeholder(shape=[None,self.model.nonspatial_size], dtype=tf.float32)
             self.inputs_spatial_screen_reshaped = tf.placeholder(shape=[None,self.model.screen_size, self.model.screen_size,self.model.screen_channels], dtype=tf.float32)
             self.nonspatial_dense = tf.layers.dense(
                 inputs=self.inputs_nonspatial,
@@ -267,12 +231,14 @@ class AC_Network():
                 inputs=self.latent_vector,
                 units=self.model.action_count,
                 activation=tf.nn.softmax,
-                kernel_initializer=normalized_columns_initializer(0.01))
+                kernel_initializer=normalized_columns_initializer(0.01),
+                name='policy_base_actions')
             self.policy_arg = {}
             if scope != 'global':
-                self.policy_arg_placeholder = {}
+                self.action_arg = {}
                 self.policy_one_hot = {}
                 self.responsible_outputs = {}
+                self.log_policy_base_actions = tf.log(tf.clip_by_value(self.policy_base_actions, 1e-20, 1.0)) # avoid NaN with clipping when value in policy becomes zero
                 self.entropy_base = - tf.reduce_sum(self.policy_base_actions * self.log_policy_base_actions)
                 self.entropy = self.entropy_base
                 self.entropy_arg = {}
@@ -283,19 +249,22 @@ class AC_Network():
                 self.advantages = tf.placeholder(shape=[None],dtype=tf.float32)
 
                 self.responsible_outputs_base = tf.reduce_sum(self.policy_base_actions * self.actions_onehot_base, [1])
-                
+                self.value = tf.layers.dense(
+                    inputs=self.latent_vector,
+                    units=1,
+                    kernel_initializer=normalized_columns_initializer(1.0),
+                    name = 'value')
                 # Loss functions
                 self.value_loss = 0.5 * tf.reduce_sum(tf.square(self.target_v - tf.reshape(self.value,[-1])))
 
-                self.log_policy_base_actions = tf.log(tf.clip_by_value(self.policy_base_actions, 1e-20, 1.0)) # avoid NaN with clipping when value in policy becomes zero
         
-                self.policy_loss_base = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_base, 1e-20, 1.0))*self.advantages)
+                self.policy_loss_base = - tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs_base, 1e-20, 1.0))*self.advantages, name='Policy_Loss_Base')
                 self.policy_loss = self.policy_loss_base
             #iterate over all function argument types
             for arg_type in actions.TYPES:
                 self.policy_arg[arg_type] = []
                 if scope != 'global':
-                    self.policy_arg_placeholder[arg_type] = []
+                    self.action_arg[arg_type] = []
                     self.policy_one_hot[arg_type] = []
                     self.responsible_outputs[arg_type] = []
                     self.entropy_arg[arg_type] = []
@@ -307,27 +276,22 @@ class AC_Network():
                         size = self.model.minimap_size
                     else:
                         size = arg_size
-
                     if arg_type == actions.TYPES.queued or arg_type == actions.TYPES.select_add:
                         init_val = 1.0
                     else:
                         init_val = 0.01
                     self.policy_arg[arg_type].append(tf.layers.dense(inputs=self.latent_vector,
-                                                    units=size,
-                                                    activation=tf.nn.softmax,
-                                                    kernel_initializer=normalized_columns_initializer(init_val)))
+                                                                     units=size,
+                                                                     activation=tf.nn.softmax,
+                                                                     kernel_initializer=normalized_columns_initializer(init_val)))
                     if scope != 'global':
-                        self.policy_arg_placeholder[arg_type].append(tf.placeholder(shape=[None], dtype = tf.int32))
-                        self.policy_one_hot.append(tf.one_hot(self.policy_arg_place_holder[arg_type][-1], size, dtype=tf.float32))
-                        self.responsible_outputs[arg_type].append(tf.reduce_sum(self.policy_arg[arg_type][-1]*self.policy_one_shot[arg_type][-1], [1]))
+                        self.action_arg[arg_type].append(tf.placeholder(shape=[None], dtype = tf.int32))
+                        self.policy_one_hot[arg_type].append(tf.one_hot(self.action_arg[arg_type][-1], size, dtype=tf.float32))
+                        self.responsible_outputs[arg_type].append(tf.reduce_sum(self.policy_arg[arg_type][-1]*self.policy_one_hot[arg_type][-1], [1]))
                         self.entropy_arg[arg_type].append(-tf.reduce_sum(self.policy_arg[arg_type][-1] * tf.log(tf.clip_by_value(self.policy_arg[arg_type], 1e-20, 1.0))))
                         self.entropy += self.entropy_arg[arg_type][-1]
                         self.policy_loss_arg[arg_type].append(tf.reduce_sum(tf.log(tf.clip_by_value(self.responsible_outputs[arg_type], 1e-20, 1.0))*self.advantages))
                         self.policy_loss += self.policy_loss_arg[arg_type][-1]
-            self.value = tf.layers.dense(
-                inputs=self.latent_vector,
-                units=1,
-                kernel_initializer=normalized_columns_initializer(1.0))
             # Only the worker network need ops for loss functions and gradient updating.
             # calculates the losses
             # self.gradients - gradients of loss wrt local_vars
@@ -342,12 +306,13 @@ class AC_Network():
                 
                 # Apply local gradients to global network
                 global_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'global')
+                print("Global:\n",len(global_vars),"\n\nLocal:\n",len(local_vars))
                 self.apply_grads = trainer.apply_gradients(zip(grads,global_vars))
-
+            print('Finished for scope ',scope)
 ## WORKER AGENT
 
 class Worker():
-    def __init__(self,name,trainer,model_path,global_episodes):
+    def __init__(self,name,trainer,model_path,global_episodes, agent_model=AgentModel()):
         self.name = "worker_" + str(name)
         self.number = name        
         self.model_path = model_path
@@ -360,7 +325,7 @@ class Worker():
         self.summary_writer = tf.summary.FileWriter("train_"+str(self.number))
 
         #Create the local copy of the network and the tensorflow op to copy global paramters to local network
-        self.local_AC = AC_Network(self.name,trainer)
+        self.local_AC = AC_Network(self.name,trainer, agent_model=agent_model)
         self.update_local_ops = update_target_graph('global',self.name)        
         
         self.env = sc2_env.SC2Env(map_name="DefeatRoaches")
@@ -471,7 +436,7 @@ class Worker():
                         caclulated_args = []
                         for i in range(len(arg_type.sizes)):
                             #Run session on required args for action
-                            calculated_args.append(sess.run(self.policy_arg[arg_type][i]))
+                            calculated_args.append(sample_dist(sess.run(self.policy_arg[arg_type][i])))
                         #Append complete argument to list of arguments
                         used_args.append(calculated_args)
                     
@@ -576,7 +541,7 @@ def main():
     with tf.device("/cpu:0"): 
         global_episodes = tf.Variable(0,dtype=tf.int32,name='global_episodes',trainable=False)
         trainer = tf.train.AdamOptimizer(learning_rate=1e-4)
-        master_network = AC_Network('global',None) # Generate global network
+        master_network = AC_Network('global',None, agent_model=AgentModel()) # Generate global network
         num_workers = multiprocessing.cpu_count() # Set workers to number of available CPU threads
         workers = []
         # Create worker classes
