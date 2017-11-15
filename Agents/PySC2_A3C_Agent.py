@@ -11,7 +11,6 @@ https://github.com/awjuliani/DeepRL-Agents
 """
 
 import threading
-#import multiprocessing
 import psutil
 import numpy as np
 import tensorflow as tf
@@ -73,16 +72,26 @@ def sample_dist(dist):
 
 # Structure data of AC Netowirk based on race of player
 class AgentModel:
-    def __init__(self, race = 'T', is_training = False, screen_size = 128, minimap_size=128):
-        if race not in sc2_env.races.keys():
-            raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
-        self.screen_size = screen_size
+    def __init__(self, race = 'T', is_training = False, screen_size = 128, minimap_size=128, max_episodes_kept = 50, save_increment = 100, agent_model = None):
+        if agent_model != None and isinstance(agent_model, AgentModel):
+                self.screen_size = agent_model.screen_size
+                self.save_increment = agent_model.save_increment
+                self.max_episodes_kept = agent_model.max_episodes_kept
+                self.minimap_size = agent_model.minimap_size
+                self.is_training = agent_model.is_training
+                self.race = agent_model.race
+        else:
+                if race not in sc2_env.races.keys():
+                        raise ValueError("Invalid race selected: {0}.\n Race must be one of {1}.".format(race, sc2_env.races.keys()))
+                self.screen_size = screen_size
+                self.save_increment = save_increment
+                self.max_episodes_kept = max_episodes_kept
+                self.minimap_size = minimap_size
+                self.is_training = is_training
+                self.race = race
         self.screen_channels = len(features.SCREEN_FEATURES)
-        self.minimap_size = minimap_size
         self.minimap_channels = len(features.MINIMAP_FEATURES)
-        self.is_training = is_training
-        self.initially_zero_features = {'cargo': 500, 'multi_select': 500, 'build_queue': 10, 'single_select': 1}
-        self.race = race
+        self.variable_features = {'cargo': 500, 'multi_select': 500, 'build_queue': 10, 'single_select': 1}
         self.setup_actions()
         self.reset()
         self.nonspatial_size = self.calculate_nonspatial_size()
@@ -94,8 +103,6 @@ class AgentModel:
         self.general_actions = list(SC2Definitions.ACTIONS['N'])
         #Limit actions based on race
         self.race_actions = list(SC2Definitions.ACTIONS[self.race])
-#        print('General Actions:\n{0}'.format(self.general_actions))
-#        print('Race Actions:\n{0}'.format(self.race_actions))
         #Create dictionaries for quicker look-ups of action indices
         self.action_indices = {'N':{},self.race:{}}
         for i in range(len(self.general_actions)):
@@ -131,12 +138,7 @@ class AgentModel:
         # is episode over?
         episode_end = (observation.step_type == environment.StepType.LAST)
 	# reward
-        actions_used = np.sum(self.used_actions['N'])+np.sum(self.used_actions[self.race])
-        if actions_used > 0:
-                no_op_penalty = self.used_actions['N'][0] / (actions_used * 50)
-        else:
-                no_op_penalty = 0
-        reward = observation.reward# - no_op_penalty
+        reward = observation.reward
 	# features
         features = observation.observation
         spatial_features = ['minimap', 'screen']
@@ -144,13 +146,14 @@ class AgentModel:
         # the shapes of some features depend on the state (eg. shape of multi_select depends on number of units)
         # since tf requires fixed input shapes, we set a maximum size then pad the input if it falls short
         max_no = {'cargo': 500, 'multi_select': 500, 'build_queue': 10}
-        nonspatial_stack = np.concatenate((self.max_units_seen,self.used_actions['N'],self.used_actions[self.race], available_actions))
+        nonspatial_stack = np.concatenate(((self.max_units_seen,self.used_actions['N'],self.used_actions[self.race], available_actions, [self.last_action_used])))
         for feature_label, feature in observation.observation.items():
        	        if feature_label not in spatial_features + variable_features + ['available_actions']:
                         nonspatial_stack = np.concatenate((nonspatial_stack, feature.reshape(-1)))
        	        elif feature_label in variable_features:
                         padded_feature = np.concatenate((feature.reshape(-1), np.zeros(max_no[feature_label] * _SELECT_SIZE - len(feature.reshape(-1)))))
                         nonspatial_stack = np.concatenate((nonspatial_stack, padded_feature))
+
         nonspatial_stack = np.expand_dims(nonspatial_stack, axis=0)
         # spatial_minimap features
         minimap_stack = np.expand_dims(np.stack(features['minimap'], axis=2), axis=0)
@@ -183,26 +186,17 @@ class AgentModel:
         #Add action space sizes for tracking which actions we can take
         size = self.action_count * 2 #Multiply by two for entries that keep track of how many times used
         #Increase size by number of unit types for enemies seen
-        size += self.max_units_seen.size
+        size += self.max_units_seen.size + 1 # +1 for last action used
         #Increase size by nonspatial structured observation data:
-        #1 player_id
-        #2 minerals
-        #3 vespene
-        #4 food used (otherwise known as supply)
-        #5 food cap
-        #6 food used by army
-        #7 food used by workers
-        #8 idle worker count
-        #9 army count
-        #10 warp gate count (for protoss)
-        #11 larva count (for zerg)
-        size += 11
-        #Increase size by control groups (10,2) and single select (1,7)
-        size += 20 + _SELECT_SIZE
-        #Increase size by max potential for units to be selected
-        size += _SELECT_SIZE * self.initially_zero_features['multi_select']
-        #print('Nonspatial_size:',size)
-        return 8538
+        nonspatial_features = features.Features(screen_size_px=(self.screen_size,self.screen_size), minimap_size_px=(self.minimap_size,self.minimap_size)).observation_spec()
+        del nonspatial_features['minimap']
+        del nonspatial_features['screen']
+        for feature_label, feature in nonspatial_features.items():
+                if feature_label in self.variable_features:
+                        size += self.variable_features[feature_label] * feature[1]
+                else:
+                        size += np.prod(feature)
+        return size
 
 
 
@@ -290,7 +284,6 @@ class AC_Network():
                                                 units=processed_size,
                                                 activation=tf.nn.softmax,
                                                 kernel_initializer=normalized_columns_initializer(0.01))
-                                        #print('Arg:',arg.name,'->',self.policy_arg[arg.name][dim])
                         self.value = tf.layers.dense(
                                 inputs=self.latent_vector,
                                 units=1,
@@ -511,7 +504,7 @@ class Worker():
                                         total_steps += 1
                                         episode_step_count += 1
                                         #If the episode hasn't ended, but the experience buffer is full, then we make an update step using that experience rollout
-                                        if len(episode_buffer) == 100 and not episode_end and episode_step_count != max_episode_length - 1:
+                                        if len(episode_buffer) == self.local_AC.model.max_episodes_kept and not episode_end and episode_step_count != max_episode_length - 1:
                                                 #Since we don't know what the true final return is, we "bootstrap" from our current value estimation
                                                 v1 = sess.run(self.local_AC.value, 
                                                               feed_dict={self.local_AC.inputs_spatial_screen: screen_stack,self.local_AC.inputs_spatial_minimap: minimap_stack,self.local_AC.inputs_nonspatial: nonspatial_stack})[0,0]
@@ -528,7 +521,7 @@ class Worker():
                                 global _max_score, _running_avg_score, _episodes, _steps
                                 if _max_score < episode_reward:
                                         _max_score = episode_reward
-                                _running_avg_score = (2.0 / 101) * (episode_reward - _running_avg_score) + _running_avg_score
+                                _running_avg_score += (episode_reward - _running_avg_score)/(episode_count if episode_count > 0 else 1)
                                 _episodes[self.number] = episode_count
                                 _steps[self.number] = total_steps
 
@@ -538,13 +531,13 @@ class Worker():
                                 if len(episode_buffer) != 0:
                                         v_l,p_l,e_l,g_n,v_n = self.train(episode_buffer,sess,gamma,0.0)
 
-                                if episode_count % 100 == 0 and episode_count != 0:
-                                        if episode_count % 100 == 0 and self.name == 'worker_0':
+                                if episode_count % self.local_AC.model.max_episodes_kept == 0 and episode_count != 0:
+                                        if episode_count % self.local_AC.model.save_increment == 0 and self.name == 'worker_0':
                                                 saver.save(sess,self.model_path+'/model-'+str(episode_count)+'.cptk')
                                                 print ("Saved Model")
-                                        mean_reward = np.mean(self.episode_rewards[-100:])
-                                        mean_length = np.mean(self.episode_lengths[-100:])
-                                        mean_value = np.mean(self.episode_mean_values[-100:])
+                                        mean_reward = np.mean(self.episode_rewards[-self.local_AC.model.max_episodes_kept:])
+                                        mean_length = np.mean(self.episode_lengths[-self.local_AC.model.max_episodes_kept:])
+                                        mean_value = np.mean(self.episode_mean_values[-self.local_AC.model.max_episodes_kept:])
                                         summary = tf.Summary()
                                         summary.value.add(tag='Perf/Reward', simple_value=float(mean_reward))
                                         summary.value.add(tag='Perf/Length', simple_value=float(mean_length))
@@ -562,18 +555,21 @@ def main():
         max_episode_length = 300
         gamma = .99 # Discount rate for advantage estimation and reward discounting
         load_model = False
-        model_path = './model'
+        race = 'T'
+        model_path = './model'+race
         map_name = FLAGS.map_name
-        assert map_name in mini_games.mini_games
+        max_episodes_kept = 5
+        agent_model = AgentModel(race=race, max_episodes_kept = max_episodes_kept)
+        #assert map_name in mini_games.mini_games
         tf.reset_default_graph()
         if not os.path.exists(model_path):
                 os.makedirs(model_path)
         with tf.device("/cpu:0"): 
                 global_episodes = tf.Variable(0,dtype=tf.int32,name='global_episodes',trainable=False)
                 trainer = tf.train.AdamOptimizer(learning_rate=1e-4)
-                master_network = AC_Network('global',None, AgentModel()) # Generate global network
+                master_network = AC_Network('global',None, AgentModel(agent_model = agent_model)) # Generate global network
                 #num_workers = multiprocessing.cpu_count() # Set workers to number of available CPU threads
-                num_workers =4# psutil.cpu_count() # Set workers to number of available CPU threads
+                num_workers =1# psutil.cpu_count() # Set workers to number of available CPU threads
                 global _max_score, _running_avg_score, _steps, _episodes
                 _max_score = 0
                 _running_avg_score = 0
@@ -582,8 +578,8 @@ def main():
                 workers = []
 		# Create worker classes
                 for i in range(num_workers):
-                        workers.append(Worker(i,trainer,model_path,global_episodes, map_name,AgentModel()))
-                saver = tf.train.Saver(max_to_keep=100)
+                        workers.append(Worker(i,trainer,model_path,global_episodes, map_name, AgentModel(agent_model=agent_model)))
+                saver = tf.train.Saver(max_to_keep=max_episodes_kept)
 
         with tf.Session() as sess:
                 coord = tf.train.Coordinator()
@@ -592,6 +588,7 @@ def main():
                         ckpt = tf.train.get_checkpoint_state(model_path)
                         saver.restore(sess,ckpt.model_checkpoint_path)
                 else:
+                        print('Initializing all variables...')
                         sess.run(tf.global_variables_initializer())
                 #This is where the asynchronous magic happens
 		# Start the "work" process for each worker in a separate thread
@@ -600,7 +597,7 @@ def main():
                         worker_work = lambda: worker.work(max_episode_length,gamma,sess,coord,saver)
                         t = threading.Thread(target=(worker_work))
                         t.start()
-                        sleep(0.5)
+                        sleep(0.125)
                         worker_threads.append(t)
                 coord.join(worker_threads)
 
